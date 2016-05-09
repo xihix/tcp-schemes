@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html>
+<body>
+<canvas id="myCanvas" width="800" height="500" style="border:1px solid #c3c3c3;">
+    Your browser does not support the HTML5 canvas tag.
+</canvas>
+<button id="activate">start</button>
+<img src="gbn-sr.png" height="180" width="180">
+<div>You chose: <label id="scheme"></label></div>
+<div>Window count down:
+    <table style="text-align: center;">
+        <tr id="win-count">
+        </tr>
+    </table>
+</div>
+<div>
+    <table style="text-align: center; width: 100">
+        <tr>
+            <td>
+                <select id="select_scheme">
+                    <option value="GBN" selected>Go-back-N</option>
+                    <option value="SR">Selective Retransmission</option>
+                </select>
+            </td>
+            <td>
+                Win size:
+                <select id="win_size">
+                    <option value="2" selected>2</option>
+                    <option value="3" >3</option>
+                    <option value="4" >4</option>
+                    <option value="5" >5</option>
+                    <option value="6" >6</option>
+                </select>
+                <!--<input id="win_size" type="number" min="2" max="6" value="4" style="width: 100">-->
+            </td>
+        </tr>
+    </table>
+</div>
+
+<script>
+    var GBN  = 'GBN';
+    var SR   = 'SR';
+    var MODE = GBN;
+    var SEND = "#00FF00";
+    var ACK  = "#0000FF";
+    var SENT = '#FFFF00';
+    var ACKED = 'red';
+    var RECVED = 'grey';
+    var NOT_SENT = '#00FFFF';
+    var NOT_RECV = '#003366';
+    var WIN = 'black';
+    var WIDTH = 50;
+    var HEIGHT = 30;
+    var HGAP  = 400;
+    var TIMEOUT = 15000;
+    var UPDATE_INT = 50;
+    var INCR  = HGAP/(TIMEOUT/UPDATE_INT)*3;
+    var NUM_OF_PAIRS = 15;
+    var INTERVAL = 25;
+    var WIN_SIZE = 4;
+    var DOWN = 'DOWN';
+    var UP = 'UP';
+    var c = document.getElementById("myCanvas");
+    var ctx = c.getContext("2d");
+    // color signs
+
+    var senders = [];
+    var receivers = [];
+    var packets = [];
+    var win  = {'from':1, 'to':WIN_SIZE, 'pos':[], 'state':WIN, 'latest':-1, 'countdown':-1};
+
+    // Draw a packet or buffered slot.
+    function draw_blk(blk) {
+        ctx.fillStyle = blk.state;
+        ctx.fillRect(blk.pos[0], blk.pos[1], blk.pos[2], blk.pos[3]);
+    }
+
+    function cover(win) {
+        if (win.from == NUM_OF_PAIRS) {
+            return;
+        }
+
+        win.pos = [senders[win.from].pos[0]-5, senders[win.from].pos[1]-5,
+            senders[win.to].pos[0] - senders[win.from].pos[0]+WIDTH+10,
+            senders[win.to].pos[1] + 10];
+        draw_blk(win);
+    }
+
+    // Handle the event when user clicks on a packet
+    function get_point_on_canvas(canvas, x, y) {
+        var bbox = canvas.getBoundingClientRect();
+        return { x: x - bbox.left * (canvas.width  / bbox.width),
+            y: y - bbox.top  * (canvas.height / bbox.height)
+        };
+    }
+
+    function hit_packet(pkt, loc) {
+        return ((loc.x >= pkt.pos[0] && loc.x <= pkt.pos[0] + pkt.pos[2]) &&
+                (loc.y >= pkt.pos[1] && loc.y <= pkt.pos[1] + pkt.pos[3]));
+    }
+
+    c.onclick = function(e) {
+        var x = event.pageX;
+        var y = event.pageY;
+        var canvas = event.target;
+        var loc = get_point_on_canvas(canvas, x, y);
+        for (var i in packets) {
+            var pkt = packets[i];
+            if (pkt.alive == 0) {delete packets[i];}
+
+            if (hit_packet(pkt, loc)) {
+                delete packets[i];
+                clear_packet(pkt);
+                clearInterval(pkt.sender.packet);
+            }
+        }
+    };
+
+    // End of handling click event.
+
+    // Reinitialize available packets..
+    function update_all() {
+        for (var i in packets) {
+            var pkt = packets[i];
+            if (pkt.alive == 0) {delete packets[i];}
+        }
+
+        clear_packet(win);
+        for (var i in senders) {
+            clear_packet(senders[i]);
+        }
+        for (var i in receivers) {
+            clear_packet(receivers[i]);
+        }
+
+        cover(win);
+        for (var i in senders) {
+            draw_blk(senders[i]);
+        }
+        for (var i in receivers) {
+            draw_blk(receivers[i]);
+        }
+//        for (var i in packets) {
+//            draw_blk(packets[i]);
+//        }
+    }
+
+    function clear_packet(pkt, m) {
+        ctx.clearRect(pkt.pos[0], pkt.pos[1]-5, pkt.pos[2], pkt.pos[3]+10);
+    }
+
+    function touch_bottom(pkt) {
+        return pkt.pos[1] >= HGAP;
+    }
+
+    function touch_top(pkt) {
+        return pkt.pos[1] <= pkt.sender.pos[1] + pkt.sender.pos[3] - HGAP;
+    }
+
+    function get_updater(pkt, inc, touch_boundary, activate) {
+        return function(){
+            clear_packet(pkt);
+            update_all();
+            if (touch_boundary(pkt)) {
+                // notify the receiver..
+                activate(pkt.sender.id); // args..
+                clearInterval( pkt.sender.packet );
+                pkt.alive = 0;
+                update_all();
+                return;
+            }
+            pkt.pos = [pkt.pos[0], pkt.pos[1]+inc, pkt.pos[2], pkt.pos[3]];
+            draw_blk(pkt);
+        };
+    }
+
+    function sr_timer (pkt, timeout) {
+        var n = timeout/1000;
+        pkt.count = n;
+        var fn = function() {
+            pkt.count -= 1;
+            document.getElementById("win-count").childNodes[pkt.sender.id].innerHTML = pkt.count;
+            if (pkt.sender.state == ACKED) {
+                clearInterval(pkt.sender.tc);
+                clearInterval(pkt.sender.packet);
+                clear_packet(pkt);
+                update_all();
+                document.getElementById('win-count').childNodes[pkt.sender.id].innerHTML = 'done';
+                return;
+            }
+
+            if (pkt.count == 0) {
+                clearInterval(pkt.sender.tc);
+                clearInterval(pkt.sender.packet);
+                clear_packet(pkt);
+                update_all();
+                activate_sender(pkt.sender.id, 'timeout');
+            }
+        };
+        return function() {
+            pkt.sender.tc = setInterval(fn, 1000);
+        }
+    }
+
+    function activate_senders(from, to) {
+
+        if (MODE == GBN) {
+            if (win.countdown > 0) {clearInterval(win.countdown);}
+            document.getElementById("win-count").innerHTML = TIMEOUT/1000;
+            win.countdown = setInterval(function(){
+                var count = parseInt(document.getElementById("win-count").innerHTML);
+                count = count - 1;
+                document.getElementById("win-count").innerHTML = count;
+                if (count == 0) {
+                    clearInterval(win.countdown);
+                    win.countdown = -1;
+                    if (win.from <= NUM_OF_PAIRS-1) {
+                        activate_senders(Math.max(win.latest, win.from), win.to);
+                    }
+                }
+            }, 1000);
+
+            for(var i = from; i < to+1; i++) {
+                var sender = senders[i];
+                var new_packet = {'pos':[sender.pos[0], sender.pos[1] + HEIGHT, WIDTH, HEIGHT],
+                    'sender':sender, 'state':SENT, 'alive':1};
+                setTimeout(get_timer(sender, new_packet, INCR, touch_bottom, DOWN), (i+1)*INTERVAL);
+                packets.push(new_packet);
+            }
+        }
+        else if (MODE == SR) {
+            // EVERY SENDER MAINTAINS A TIMER..
+            for(var i = from; i <= to; i++) {
+                var sender = senders[i];
+                var new_packet = {'pos':[sender.pos[0], sender.pos[1] + HEIGHT, WIDTH, HEIGHT],
+                    'sender':sender, 'state':SENT, 'alive':1};
+                setTimeout(sr_timer(new_packet, TIMEOUT), (i+1)*INTERVAL);
+                setTimeout(get_timer(sender, new_packet, INCR, touch_bottom, DOWN), (i+1)*INTERVAL);
+                packets.push(new_packet);
+            }
+        }
+    }
+
+    function activate_receiver(i, args) {
+        if (MODE == GBN) {
+            var receiver = receivers[win.from-1];
+            var timeout  = INTERVAL;
+            if (receivers[i-1].state == RECVED) {
+                receiver = receivers[i];
+                receiver.state = RECVED;
+            } else {
+                timeout = INTERVAL*5;
+            }
+            if (receiver.activated == 1) {return;}
+
+            var new_packet = {'pos':[receiver.pos[0], receiver.pos[1] - HEIGHT, WIDTH, HEIGHT],
+                'sender':receiver, 'state':ACK, 'alive':1};
+            setTimeout(get_timer(receiver, new_packet, -INCR, touch_top, UP), timeout);
+            receiver.activated = 1;
+            packets.push(new_packet);
+        } else if (MODE == SR) {
+            var timeout  = INTERVAL;
+            var receiver = receivers[i];
+            receiver.state = RECVED;
+
+            if (receiver.activated == 1) {return;}
+
+            var new_packet = {'pos':[receiver.pos[0], receiver.pos[1] - HEIGHT, WIDTH, HEIGHT],
+                'sender':receiver, 'state':ACK, 'alive':1};
+            setTimeout(get_timer(receiver, new_packet, -INCR, touch_top, UP), timeout);
+            receiver.activated = 1;
+            packets.push(new_packet);
+        }
+
+
+    }
+
+    function activate_sender(i, args) {
+        // This happens when an ack is received by the sender
+        // If the mechanism is about the GBN.
+
+
+        // IF WE DO IT BY GO-BACK-N SCHEME.
+        if (MODE == GBN) {
+            senders[i].state = ACKED;
+            receivers[i].activated = 0;
+            if (i > win.latest) {
+                win.latest = i;
+                if (win.from <= win.latest) {
+                    var prev_from = win.from;
+                    var prev_to   = win.to;
+                    win.to   = Math.min(win.to + (win.latest - win.from + 1), NUM_OF_PAIRS);
+                    win.from = Math.min(win.latest+1, NUM_OF_PAIRS);
+                    if (win.from >= NUM_OF_PAIRS-1) {clear_packet(win); update_all(); return;}
+                    // if the latest sender is updated, then all the packet before it is default to be received..
+                    for (var k = prev_from; k <= win.latest; k++) {
+                        senders[k].state = ACKED;
+                    }
+                    update_all();
+                    if (prev_to < win.to) {
+                        activate_senders(prev_to+1, win.to);
+                    }
+                }
+            }
+        } else if (MODE == SR) {
+            receivers[i].activated = 0;
+            var sender = senders[i];
+            if (sender.state != ACKED) {
+                if (args == 'timeout') {
+                    var new_packet = {'pos':[sender.pos[0], sender.pos[1] + HEIGHT, WIDTH, HEIGHT],
+                        'sender':sender, 'state':SENT, 'alive':1};
+                    setTimeout(sr_timer(new_packet, TIMEOUT), (i+1)*INTERVAL);
+                    setTimeout(get_timer(sender, new_packet, INCR, touch_bottom, DOWN), INTERVAL);
+                    packets.push(new_packet);
+                } else {
+                    var prev_to = win.to;
+                    senders[i].state = ACKED;
+                    var unacked = -1;
+                    for (var k = 0; k <= win.to; k++) {
+                        if (senders[k].state != ACKED) {
+                            unacked = k;
+                            break;
+                        }
+                    }
+                    console.log('from:'+parseInt(win.from));
+                    console.log('to:' + parseInt(win.to));
+                    if (unacked < 0) {
+                        win.from = Math.min(win.to + 1, NUM_OF_PAIRS-1);
+                        win.to   = Math.min(win.from + WIN_SIZE-1, NUM_OF_PAIRS-1);
+                        if (senders[NUM_OF_PAIRS-1].state == ACKED) {
+                            return;
+                        }
+                    } else {
+                        win.from = unacked;
+                        win.to   = Math.min(win.from + WIN_SIZE - 1, NUM_OF_PAIRS-1);
+                    }
+                    update_all();
+                    if (win.to > prev_to) {
+                        activate_senders(prev_to+1, win.to);
+                    }
+                }
+            }
+        }
+
+    }
+
+
+    function get_timer(sender, new_packet, inc, touch_boundary, direction) {
+        var activate = function(){};
+        if (direction == DOWN) {
+            activate_next = function(id, args){
+                activate_receiver(id, args);
+            }
+        }
+        else if (direction == UP) {
+            activate_next = function(id, args){
+                activate_sender(id, args);
+            }
+        }
+        else {}
+
+        return function() {
+            sender.packet = setInterval(get_updater(new_packet, inc, touch_boundary, activate_next), UPDATE_INT);
+        }
+    }
+
+    document.getElementById('win_size').value = WIN_SIZE;
+    document.getElementById('win_size').onchange = function() {
+        WIN_SIZE = parseInt(document.getElementById('win_size').value);
+        win.to = WIN_SIZE;
+    };
+
+    document.getElementById('scheme').innerHTML = MODE;
+    document.getElementById('select_scheme').onchange = function() {
+        MODE = document.getElementById('select_scheme').selectedOptions[0].value;
+        document.getElementById('scheme').innerHTML = MODE;
+    };
+
+    document.getElementById('activate').onclick = function() {
+        var act_btn = document.getElementById('activate');
+        if (act_btn.innerHTML == 'start') {
+            act_btn.innerHTML = 'reset';
+            // disable the options;
+            document.getElementById('select_scheme').disabled=true;
+            document.getElementById('win_size').disabled=true;
+
+            if (MODE == GBN) {
+                var node = document.createElement('td');
+                node.innerHTML = 'inactivated';
+                document.getElementById("win-count").appendChild(node);
+            } else if (MODE == SR) {
+                for (var k = 1; k < NUM_OF_PAIRS; k++) {
+                    var node = document.createElement('td');
+                    node.width = "50";
+                    node.display = "inline";
+                    node.innerHTML = 'TBD';
+                    document.getElementById("win-count").appendChild(node);
+                }
+                document.getElementById("win-count").childNodes[0].innerHTML = 'done';
+            }
+
+
+            // Initilize the grid.
+            (function(){
+                var init_pos = [-30, 30, WIDTH, HEIGHT];
+                var offset = 10;
+                for(var i = 0; i < NUM_OF_PAIRS+1; i++) {
+                    init_pos[0] = init_pos[0] + init_pos[2] + offset;
+                    var sender = {'pos':[init_pos[0], init_pos[1], init_pos[2], init_pos[3]],
+                        'state':NOT_SENT, 'id':i};
+                    var receiver = {'pos':[init_pos[0], init_pos[1] + HGAP, init_pos[2], init_pos[3]],
+                        'state':NOT_RECV, 'id':i, 'activated':0, 'packet':-1};
+                    senders.push(sender);
+                    receivers.push(receiver);
+                }
+                senders[0].state   = ACKED;
+                receivers[0].state = RECVED;
+                update_all();
+                activate_senders(win.from, win.to);
+            })();
+        }
+        else {
+            // stop..
+            history.go(0);
+        }
+    };
+
+</script>
+
+</body>
+</html>
